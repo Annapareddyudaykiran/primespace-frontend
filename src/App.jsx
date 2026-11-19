@@ -81,6 +81,17 @@ function responseRows(payload) {
   return [];
 }
 
+function mergeAccessRequests(requests, users) {
+  const combined = new Map((requests || []).map((request) => [String(request.id), request]));
+  (users || []).filter((user) => user.status === "Pending Approval" || user.status === "PENDING").forEach((user) => {
+    const id = String(user.id);
+    if (!combined.has(id)) combined.set(id, {
+      id: user.id, name: user.name, email: user.login, requestedRole: user.requestedRole || "Role request",
+    });
+  });
+  return [...combined.values()];
+}
+
 function App() {
   const [auth, setAuth] = useState(null);
   const [page, setPage] = useState("dashboard");
@@ -94,11 +105,21 @@ function App() {
   const [toast, setToast] = useState(null);
   const [loginBusy, setLoginBusy] = useState(false);
   const [authError, setAuthError] = useState("");
+  const [roleRows, setRoleRows] = useState([]);
+  const [accessRequests, setAccessRequests] = useState([]);
+  const [accessRequestError, setAccessRequestError] = useState("");
+  const [notificationsOpen, setNotificationsOpen] = useState(false);
+  const [resetPasswordUser, setResetPasswordUser] = useState(null);
+  const [clientTicketOpen, setClientTicketOpen] = useState(false);
+  const [viewingTicket, setViewingTicket] = useState(null);
+  const [ticketLocations, setTicketLocations] = useState([]);
+  const [ticketOptionsError, setTicketOptionsError] = useState("");
+  const [signupNotice, setSignupNotice] = useState("");
 
   const user = auth?.user;
   const userName = user?.name || user?.fullName || user?.displayName || user?.email || "User";
   const role = user?.role || "";
-  const allowedPages = ROLE_PAGES[role] || [];
+  const allowedPages = auth?.modules || ROLE_PAGES[role] || [];
   const pageEntry = PAGE_LIST.find(([id]) => id === page);
   const config = MODULES[page] || SPECIAL_PAGES[page] || { title: pageEntry?.[1] || "PrimeSpace", description: "" };
   const canCreate = !READ_ONLY.has(page) && !["myatt", "settings"].includes(page) && page !== "dashboard";
@@ -132,6 +153,40 @@ function App() {
       finally { setLoading(false); }
       return;
     }
+    if (activePage === "helpdesk" && activeAuth.user?.role === "Client User") {
+      setLoading(true); setLoadError(""); setTicketOptionsError("");
+      const [ticketsResult, optionsResult] = await Promise.allSettled([
+        apiRequest("/tickets", { token: activeAuth.token }),
+        apiRequest("/tickets/options", { token: activeAuth.token }),
+      ]);
+      if (ticketsResult.status === "fulfilled") setPageData(responseRows(ticketsResult.value));
+      else { setPageData([]); setLoadError(ticketsResult.reason.message); }
+      if (optionsResult.status === "fulfilled") setTicketLocations(responseRows(optionsResult.value?.locations));
+      else { setTicketLocations([]); setTicketOptionsError(optionsResult.reason.message); }
+      setLoading(false);
+      return;
+    }
+    if (activePage === "users") {
+      setLoading(true); setLoadError("");
+      const [usersResult, rolesResult, requestsResult] = await Promise.allSettled([
+        apiRequest("/users", { token: activeAuth.token }),
+        apiRequest("/roles", { token: activeAuth.token }),
+        apiRequest("/users/access-requests", { token: activeAuth.token }),
+      ]);
+      const loadedUsers = usersResult.status === "fulfilled" ? responseRows(usersResult.value) : [];
+      const loadedRequests = requestsResult.status === "fulfilled" ? responseRows(requestsResult.value) : [];
+      if (usersResult.status === "fulfilled") {
+        setPageData(loadedUsers); setLoadError("");
+      } else {
+        setPageData([]); setLoadError(usersResult.reason.message);
+      }
+      if (rolesResult.status === "fulfilled") setRoleRows(responseRows(rolesResult.value));
+      else setRoleRows([]);
+      setAccessRequests(mergeAccessRequests(loadedRequests, loadedUsers));
+      setAccessRequestError(requestsResult.status === "rejected" && loadedUsers.length === 0 ? requestsResult.reason.message : "");
+      setLoading(false);
+      return;
+    }
     if (!configFor(activePage).path) return;
     setLoading(true); setLoadError("");
     try { setPageData(responseRows(await apiRequest(configFor(activePage).path, { token: activeAuth.token }))); }
@@ -141,18 +196,38 @@ function App() {
 
   useEffect(() => { if (auth) loadPage(page, auth); }, [auth, page, loadPage]);
   useEffect(() => { if (!toast) return undefined; const timer = window.setTimeout(() => setToast(null), 3200); return () => window.clearTimeout(timer); }, [toast]);
+  useEffect(() => {
+    if (!auth?.token || role !== "Super Admin") return undefined;
+    let active = true;
+    const refreshRequests = async () => {
+      const [requestsResult, usersResult] = await Promise.allSettled([
+        apiRequest("/users/access-requests", { token: auth.token }),
+        apiRequest("/users", { token: auth.token }),
+      ]);
+      if (!active) return;
+      const requestRows = requestsResult.status === "fulfilled" ? responseRows(requestsResult.value) : [];
+      const userRows = usersResult.status === "fulfilled" ? responseRows(usersResult.value) : [];
+      setAccessRequests(mergeAccessRequests(requestRows, userRows));
+      setAccessRequestError(requestsResult.status === "rejected" && usersResult.status === "rejected"
+        ? requestsResult.reason.message : "");
+    };
+    refreshRequests();
+    const timer = window.setInterval(refreshRequests, 10000);
+    return () => { active = false; window.clearInterval(timer); };
+  }, [auth?.token, page, role]);
 
   async function handleLogin(event) {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
     setLoginBusy(true);
     setAuthError("");
+    setSignupNotice("");
     try {
       const result = await apiRequest("/auth/login", { method: "POST", body: { username: form.get("email"), password: form.get("password") } });
       const token = result?.accessToken || result?.token;
       const account = result?.user || result?.account;
       if (!token || !account) throw new Error("Login response did not include an access token and user profile.");
-      setAuth({ token, user: account }); setPage("dashboard"); setLoadError("");
+      setAuth({ token, user: account, modules: result?.modules || [] }); setPage("dashboard"); setLoadError("");
       notify(`Welcome, ${account.name || account.fullName || account.email || "user"}`);
     } catch (error) { setAuthError(error.message); }
     finally { setLoginBusy(false); }
@@ -167,6 +242,7 @@ function App() {
     }
     setLoginBusy(true);
     setAuthError("");
+    setSignupNotice("");
     try {
       const result = await apiRequest("/auth/register", {
         method: "POST",
@@ -175,12 +251,21 @@ function App() {
           email: form.get("email"),
           organisationName: form.get("organisationName"),
           password: form.get("password"),
+          requestedRole: form.get("requestedRole"),
         },
       });
+      if (result?.pendingApproval) {
+        setSignupNotice(result.message || "Your access request was sent to the organisation administrator for approval.");
+        return;
+      }
       const token = result?.accessToken || result?.token;
       const account = result?.user || result?.account;
       if (!token || !account) throw new Error("Registration succeeded without an access token and user profile.");
-      setAuth({ token, user: account }); setPage("dashboard"); setLoadError("");
+      const requestedRole = form.get("requestedRole");
+      if (account.role && account.role !== requestedRole) {
+        throw new Error(`The server assigned ${account.role} instead of your requested ${requestedRole}. Your sign-up was not logged in. Restart the updated backend and try again.`);
+      }
+      setAuth({ token, user: account, modules: result?.modules || [] }); setPage("dashboard"); setLoadError("");
       notify(`Account created. Welcome, ${account.name || account.fullName || account.email || "user"}`);
     } catch (error) { setAuthError(error.message); }
     finally { setLoginBusy(false); }
@@ -192,6 +277,7 @@ function App() {
       catch { /* Local token state is still cleared on logout. */ }
     }
     setAuth(null); setPage("dashboard"); setPageData([]); setSummary(null); setLoadError(""); setModal(null);
+    setAccessRequests([]); setAccessRequestError(""); setNotificationsOpen(false);
     notify("You have logged out");
   }
 
@@ -206,6 +292,44 @@ function App() {
       setModal(null);
       await loadPage(page, auth);
       notify(modal?.record ? "Record updated" : "Record created");
+    } catch (error) { notify(error.message, true); }
+  }
+
+  async function createClientTicket(values) {
+    try {
+      await apiRequest("/tickets", { token: auth.token, method: "POST", body: values });
+      setClientTicketOpen(false);
+      await loadPage("helpdesk", auth);
+      notify("Ticket created successfully");
+    } catch (error) { notify(error.message, true); }
+  }
+
+  async function resetUserPassword(userId, password) {
+    await apiRequest(`/users/${userId}/password`, { token: auth.token, method: "PUT", body: { password } });
+    setResetPasswordUser(null); notify("Password reset successfully");
+  }
+
+  async function setManagedUserStatus(record, status) {
+    try {
+      await apiRequest(`/users/${record.id}/status`, { token: auth.token, method: "PATCH", body: { status } });
+      await loadPage("users", auth); notify(`User ${status === "Active" ? "activated" : "deactivated"}`);
+    } catch (error) { notify(error.message, true); }
+  }
+
+  async function deleteManagedUser(record) {
+    if (!window.confirm(`Delete ${record.name}? Historical records must be preserved, so linked accounts can only be deactivated.`)) return;
+    try {
+      await apiRequest(`/users/${record.id}`, { token: auth.token, method: "DELETE" });
+      await loadPage("users", auth); notify("User deleted");
+    } catch (error) { notify(error.message, true); }
+  }
+
+  async function decideAccessRequest(request, decision, roleName) {
+    try {
+      await apiRequest(`/users/access-requests/${request.id}`, { token: auth.token, method: "PATCH", body: { decision, role: roleName } });
+      await loadPage("users", auth);
+      setNotificationsOpen(false);
+      notify(decision === "APPROVE" ? `${request.name} approved as ${roleName}` : `Access request from ${request.name} rejected`);
     } catch (error) { notify(error.message, true); }
   }
 
@@ -231,7 +355,7 @@ function App() {
     } catch (error) { notify(error.message, true); }
   }
 
-  if (!auth) return <Login onSignIn={handleLogin} onSignUp={handleSignup} busy={loginBusy} error={authError} />;
+  if (!auth) return <Login onSignIn={handleLogin} onSignUp={handleSignup} busy={loginBusy} error={authError} notice={signupNotice} />;
 
   const visibleRows = pageData.filter((record) => {
     const text = Object.values(record || {}).join(" ").toLowerCase();
@@ -258,13 +382,18 @@ function App() {
       </aside>
 
       <main className="main">
-        <header className="topbar"><div className="crumb">{config.title}</div><div className="topright"><span className="muted date-label">{new Date().toLocaleDateString("en-GB", { weekday: "short", day: "2-digit", month: "short", year: "numeric" })}</span><span className="muted user-label">{userName} · {role}</span><div className="avatar">{initials(userName)}</div></div></header>
+        <header className="topbar"><div className="crumb">{config.title}</div><div className="topright"><span className="muted date-label">{new Date().toLocaleDateString("en-GB", { weekday: "short", day: "2-digit", month: "short", year: "numeric" })}</span><span className="muted user-label">{userName} · {role}</span>{role === "Super Admin" && <div className="notification-wrap"><button className="notification-bell" aria-label={`${accessRequests.length} pending access requests`} aria-expanded={notificationsOpen} onClick={() => setNotificationsOpen((open) => !open)}>🔔{accessRequests.length > 0 && <span className="notification-count">{accessRequests.length}</span>}</button>{notificationsOpen && <div className="notification-popover"><div className="notification-heading"><b>Access requests</b><span>{accessRequests.length} pending</span></div>{accessRequestError ? <p className="notification-empty error-text">{accessRequestError}</p> : accessRequests.length === 0 ? <p className="notification-empty">No pending requests.</p> : <div className="notification-list">{accessRequests.map((request) => <div className="notification-item" key={request.id}><b>{request.name}</b><span>{request.email}</span><span>Organisation: {request.organisation || "Unknown organisation"}</span><span>Requested: {request.requestedRole}</span><div className="notification-actions"><button className="small" onClick={() => decideAccessRequest(request, "APPROVE", request.requestedRole)}>Accept</button><button className="danger small" onClick={() => decideAccessRequest(request, "REJECT")}>Reject</button></div></div>)}</div>}<button className="secondary notification-view" onClick={() => { setNotificationsOpen(false); setPage("users"); }}>View all requests</button></div>}</div>}<div className="avatar">{initials(userName)}</div></div></header>
         <div className="content">
           {page === "dashboard" ? <Dashboard summary={summary} loading={loading} error={loadError} onNavigate={setPage} /> :
             page === "myatt" ? <AttendancePage rows={pageData} loading={loading} error={loadError} onAction={attendanceAction} /> :
             page === "settings" ? <SettingsPage user={user} onPassword={() => notify("Password update will be available when the account API is implemented.", true)} /> :
             page === "reports" ? <ReportsPage summary={summary} rows={pageData} loading={loading} error={loadError} /> :
-            <ModulePage
+            page === "users" ? <UsersRolesPage rows={pageData} roles={roleRows} requests={accessRequests} loading={loading} error={loadError} requestError={accessRequestError}
+              onCreate={() => setModal({ record: null })} onEdit={(record) => setModal({ record })}
+              onResetPassword={setResetPasswordUser} onSetStatus={setManagedUserStatus} onDelete={deleteManagedUser}
+              onDecideRequest={decideAccessRequest} currentUser={user} /> :
+            page === "helpdesk" && role === "Client User" ? <ClientHelpdeskPage rows={pageData} loading={loading} error={loadError}
+              onCreate={() => setClientTicketOpen(true)} onView={setViewingTicket} /> : <ModulePage
               page={page} config={config} rows={visibleRows} allRows={pageData} loading={loading} error={loadError}
               query={query} setQuery={setQuery} statuses={statuses} statusFilter={statusFilter} setStatusFilter={setStatusFilter}
               onCreate={() => setModal({ record: null })} onEdit={(record) => setModal({ record })}
@@ -276,6 +405,9 @@ function App() {
       </main>
 
       {modal && <RecordModal title={`${modal.record ? "Edit" : "Add"} ${config.title}`} fields={config.fields || []} record={modal.record} busy={loading} onClose={() => setModal(null)} onSave={saveRecord} />}
+      {clientTicketOpen && <ClientTicketModal locations={ticketLocations} optionsError={ticketOptionsError} onClose={() => setClientTicketOpen(false)} onSubmit={createClientTicket} />}
+      {viewingTicket && <ClientTicketDetails ticket={viewingTicket} onClose={() => setViewingTicket(null)} />}
+      {resetPasswordUser && <ResetPasswordModal user={resetPasswordUser} onClose={() => setResetPasswordUser(null)} onSave={resetUserPassword} />}
       {toast && <div className={`toast show${toast.isError ? " err" : ""}`}>{toast.message}</div>}
     </div>
   );
@@ -283,7 +415,7 @@ function App() {
 
 function configFor(page) { return MODULES[page] || SPECIAL_PAGES[page] || {}; }
 
-function Login({ onSignIn, onSignUp, busy, error }) {
+function Login({ onSignIn, onSignUp, busy, error, notice }) {
   const [passwordVisible, setPasswordVisible] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
   const [mode, setMode] = useState("signin");
@@ -302,17 +434,19 @@ function Login({ onSignIn, onSignUp, busy, error }) {
           <button type="button" role="tab" aria-selected={signingUp} className={signingUp ? "active" : ""} onClick={() => setMode("signup")}>Sign up</button>
         </div>
         <h2>{signingUp ? "Create your account" : "Welcome to PrimeSpace"}</h2>
-        <p>{signingUp ? "Register a new PrimeSpace workspace." : "Sign in to your workspace."}</p>
+        <p>{signingUp ? "Request access to your PrimeSpace organisation." : "Sign in to your workspace."}</p>
         {signingUp && <>
           <label><span className="formlabel">Full name</span><div className="field-ic"><span>👤</span><input name="name" type="text" placeholder="Enter your full name" required maxLength={180} autoComplete="name" /></div></label>
           <label><span className="formlabel">Organisation name</span><div className="field-ic"><span>🏢</span><input name="organisationName" type="text" placeholder="Enter your organisation" required maxLength={180} autoComplete="organization" /></div></label>
+          <label><span className="formlabel">Account type</span><select name="requestedRole" defaultValue="Client User"><option>Property Manager</option><option>Helpdesk Executive</option><option>Supervisor</option><option>Technician</option><option>Client User</option></select></label>
         </>}
         <label><span className="formlabel">Email</span><div className="field-ic"><span>✉</span><input name="email" type="email" placeholder="Enter your email" required maxLength={254} autoComplete="email" /></div></label>
         <label><span className="formlabel">Password</span><div className="field-ic pw"><span>🔒</span><input name="password" type={passwordVisible ? "text" : "password"} placeholder={signingUp ? "At least 12 characters" : "Enter your password"} required minLength={signingUp ? 12 : undefined} maxLength={72} autoComplete={signingUp ? "new-password" : "current-password"} /><button type="button" className="secondary" onClick={() => setPasswordVisible((value) => !value)}>{passwordVisible ? "Hide" : "Show"}</button></div></label>
         {signingUp && <label><span className="formlabel">Confirm password</span><div className="field-ic"><span>🔒</span><input name="confirmPassword" type="password" placeholder="Re-enter your password" required minLength={12} maxLength={72} autoComplete="new-password" /></div></label>}
         {!signingUp && <button type="button" className="fp" onClick={() => setShowHelp(true)}>🔒 Forgot Password?</button>}
-        {signingUp && <p className="signup-note">This creates a new organisation and its first Property Manager. To join an existing organisation, contact its administrator.</p>}
+        {signingUp && <p className="signup-note">Enter the exact name of an organisation that already exists in PrimeSpace. Client User accounts are approved automatically. Property Manager, Helpdesk Executive, Supervisor, and Technician requests go to that organisation’s Super Admin for approval. Super Admin cannot be selected here.</p>}
         {error && <div className="autherr" role="alert">{error}</div>}
+        {notice && <div className="signup-notice" role="status">{notice}</div>}
         <button type="submit" disabled={busy}>{busy ? (signingUp ? "Creating account…" : "Signing in…") : (signingUp ? "➜ Sign up" : "➜ Sign in")}</button>
       </form></div>
       {showHelp && <div className="modalback show" onMouseDown={(event) => { if (event.target === event.currentTarget) setShowHelp(false); }}><div className="modal"><div className="modalhead"><h2>Account assistance</h2><button className="x" onClick={() => setShowHelp(false)}>✕</button></div><p>Please contact your PrimeSpace administrator for account access or password reset.</p><div className="modalfoot"><button onClick={() => setShowHelp(false)}>Close</button></div></div></div>}
@@ -333,6 +467,84 @@ function Dashboard({ summary, loading, error, onNavigate }) {
     <LoadState loading={loading} error={error} emptyMessage={!summary ? "Dashboard metrics will appear when the dashboard API is available." : ""} />
     <div className="grid two"><div className="card"><h3>Work waiting for action</h3><p className="muted">Open tickets and assigned work orders are loaded from the backend.</p><button className="secondary" onClick={() => onNavigate("helpdesk")}>View helpdesk</button></div><div className="card"><h3>Recent activity</h3><p className="muted">Recent operational events will appear here from the audit API.</p><button className="secondary" onClick={() => onNavigate("audit")}>View audit log</button></div></div>
   </>;
+}
+
+function UsersRolesPage({ rows, roles, requests, loading, error, requestError, onCreate, onEdit, onResetPassword, onSetStatus, onDelete, onDecideRequest, currentUser }) {
+  const [tab, setTab] = useState("users");
+  const [query, setQuery] = useState("");
+  const [status, setStatus] = useState("");
+  const [roleChoice, setRoleChoice] = useState({});
+  useEffect(() => { if (requests.length > 0) setTab("requests"); }, [requests.length]);
+  const filtered = rows.filter((row) => {
+    const matchesText = !query || `${row.name} ${row.login} ${row.role} ${row.scope}`.toLowerCase().includes(query.toLowerCase());
+    return matchesText && (!status || row.status === status);
+  });
+  return <>
+    <PageHeading title="Users, Roles & Permissions" description="Manage login accounts, property scope, and the modules each role can access."
+      action={tab === "users" && <button onClick={onCreate}>+ Add user</button>} />
+    <div className="role-tabs" role="tablist" aria-label="User and role management">
+      <button role="tab" aria-selected={tab === "users"} className={tab === "users" ? "active" : ""} onClick={() => setTab("users")}>Users</button>
+      <button role="tab" aria-selected={tab === "requests"} className={tab === "requests" ? "active" : ""} onClick={() => setTab("requests")}>Access requests{requests.length > 0 ? ` (${requests.length})` : ""}</button>
+      <button role="tab" aria-selected={tab === "roles"} className={tab === "roles" ? "active" : ""} onClick={() => setTab("roles")}>Roles &amp; Permissions</button>
+    </div>
+    {tab === "users" ? <>
+      {requests.length > 0 && <div className="card access-request-banner"><div><b>{requests.length} pending access request{requests.length === 1 ? "" : "s"}</b><span>Review role requests from this organisation.</span></div><button onClick={() => setTab("requests")}>Review requests</button></div>}
+      <div className="toolbar"><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search users..." />
+        <select value={status} onChange={(event) => setStatus(event.target.value)}><option value="">All statuses</option><option>Active</option><option>Pending Approval</option><option>Rejected</option><option>Disabled</option></select></div>
+      {error ? <LoadState error={error} /> : loading ? <LoadState loading={loading} /> :
+        <div className="tablewrap"><table className="table user-table"><thead><tr><th>Name</th><th>Role</th><th>Email / Login ID</th><th>Scope</th><th>Status</th><th>Action</th></tr></thead>
+          <tbody>{filtered.map((record) => <tr key={record.id}>
+            <td><b>{record.name}</b></td><td><span className="role-pill">{record.role || "Unassigned"}</span></td><td>{record.login}</td><td>{record.scope}</td>
+            <td><StatusPill status={record.status} /></td>
+            <td><div className="user-actions">
+              <button className="secondary small" onClick={() => onEdit(record)}>Edit</button>
+              <button className="secondary small" onClick={() => onResetPassword(record)}>Reset password</button>
+              <button className="secondary small" disabled={record.login === currentUser?.email} onClick={() => onSetStatus(record, record.status === "Active" ? "Disabled" : "Active")}>{record.status === "Active" ? "Deactivate" : "Activate"}</button>
+              <button className="danger small" disabled={record.login === currentUser?.email} onClick={() => onDelete(record)}>Delete</button>
+            </div></td>
+          </tr>)}</tbody>
+        </table>{filtered.length === 0 && <div className="empty">No users match this search.</div>}</div>}
+    </> : tab === "requests" ? <>
+      <p className="muted">Platform-wide queue: Super Admins can review requests from every organisation.</p>
+      {requestError ? <LoadState error={requestError} /> : loading ? <LoadState loading={loading} /> : requests.length === 0 ? <div className="card empty">There are no pending access requests.</div> :
+        <div className="tablewrap"><table className="table user-table"><thead><tr><th>Name</th><th>Email</th><th>Organisation</th><th>Requested role</th><th>Grant role</th><th>Action</th></tr></thead>
+          <tbody>{requests.map((request) => <tr key={request.id}><td><b>{request.name}</b></td><td>{request.email}</td><td>{request.organisation || "—"}</td><td>{request.requestedRole}</td>
+            <td><select value={roleChoice[request.id] || request.requestedRole} onChange={(event) => setRoleChoice((current) => ({ ...current, [request.id]: event.target.value }))}>
+              {["Property Manager", "Helpdesk Executive", "Supervisor", "Technician", "Client User"].map((name) => <option key={name}>{name}</option>)}
+            </select></td>
+            <td><div className="user-actions"><button className="small" onClick={() => onDecideRequest(request, "APPROVE", roleChoice[request.id] || request.requestedRole)}>Approve</button><button className="danger small" onClick={() => onDecideRequest(request, "REJECT")}>Reject</button></div></td>
+          </tr>)}</tbody></table></div>}
+    </> : <>
+      {error ? <LoadState error={error} /> : loading ? <LoadState loading={loading} /> :
+        <div className="tablewrap role-matrix-wrap"><table className="table role-matrix"><thead><tr><th>Role</th><th>What they can do</th><th>Modules</th></tr></thead>
+          <tbody>{roles.map((role) => <tr key={role.name}><td><b>{role.name}</b></td><td>{role.description}</td>
+            <td>{(role.modules || []).map((module) => PAGE_LIST.find(([id]) => id === module)?.[1] || module).join(" · ")}</td></tr>)}</tbody>
+        </table></div>}
+    </>}
+  </>;
+}
+
+function ResetPasswordModal({ user, onClose, onSave }) {
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  async function submit(event) {
+    event.preventDefault(); setError("");
+    const form = new FormData(event.currentTarget);
+    const password = form.get("password");
+    if (password !== form.get("confirmPassword")) { setError("Passwords do not match."); return; }
+    setBusy(true);
+    try { await onSave(user.id, password); }
+    catch (reason) { setError(reason.message); }
+    finally { setBusy(false); }
+  }
+  return <div className="modalback show"><form className="modal" onSubmit={submit}>
+    <div className="modalhead"><h2>Reset password</h2><button type="button" className="x" onClick={onClose}>✕</button></div>
+    <p className="muted">Set a new password for {user.name}.</p>
+    <div className="formgrid"><label><span className="formlabel">New password</span><input name="password" type="password" minLength={12} maxLength={72} required autoComplete="new-password" /></label>
+      <label><span className="formlabel">Confirm password</span><input name="confirmPassword" type="password" minLength={12} maxLength={72} required autoComplete="new-password" /></label></div>
+    {error && <div className="autherr">{error}</div>}
+    <div className="modalfoot"><button type="button" className="secondary" onClick={onClose} disabled={busy}>Cancel</button><button type="submit" disabled={busy}>{busy ? "Saving…" : "Reset password"}</button></div>
+  </form></div>;
 }
 
 function ModulePage({ page, config, rows, loading, error, query, setQuery, statuses, statusFilter, setStatusFilter, onCreate, onEdit, onDelete, onTransition, canCreate, canDelete }) {
@@ -362,6 +574,69 @@ function ReportsPage({ summary, rows, loading, error }) {
     <div className="card"><h3>Report data</h3><p className="muted">Charts and CSV exports will use the report endpoints after they are implemented.</p></div>
   </>;
 }
+
+function ClientHelpdeskPage({ rows, loading, error, onCreate, onView }) {
+  const [query, setQuery] = useState("");
+  const [status, setStatus] = useState("");
+  const statuses = [...new Set(rows.map((ticket) => ticket.status).filter(Boolean))];
+  const filtered = rows.filter((ticket) => {
+    const text = `${ticket.id} ${ticket.title} ${ticket.requester} ${ticket.location} ${ticket.priority} ${ticket.status} ${ticket.assignee}`.toLowerCase();
+    return (!query || text.includes(query.toLowerCase())) && (!status || ticket.status === status);
+  });
+  return <>
+    <PageHeading title="Helpdesk" description="Raise a request and track it until closure." action={<button onClick={onCreate}>+ Create ticket</button>} />
+    <div className="toolbar"><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search tickets..." />
+      <select value={status} onChange={(event) => setStatus(event.target.value)}><option value="">All statuses</option>{statuses.map((item) => <option key={item}>{item}</option>)}</select></div>
+    {error ? <LoadState error={error} /> : loading ? <LoadState loading={loading} /> : rows.length === 0 ?
+      <div className="card empty">You have no tickets yet. Select <b>Create ticket</b> to raise a request.</div> : filtered.length === 0 ?
+        <div className="card empty">No tickets match this search.</div> :
+        <div className="tablewrap"><table className="table client-ticket-table"><thead><tr><th>Ticket</th><th>Issue</th><th>Requester</th><th>Location</th><th>Priority</th><th>Status</th><th>SLA</th><th>Assigned to</th><th>Action</th></tr></thead>
+          <tbody>{filtered.map((ticket) => <tr key={ticket.id}><td><b>{formatTicketId(ticket.id)}</b></td><td>{ticket.title}</td><td>{ticket.requester || "You"}</td><td>{ticket.location || "—"}</td>
+            <td><StatusPill status={ticket.priority} /></td><td><StatusPill status={ticket.status} /></td><td>{ticket.sla || "—"}</td><td>{ticket.assignee || "—"}</td>
+            <td><button className="secondary small" onClick={() => onView(ticket)}>View</button></td></tr>)}</tbody></table></div>}
+  </>;
+}
+
+function ClientTicketModal({ locations, optionsError, onClose, onSubmit }) {
+  const [propertyId, setPropertyId] = useState(locations[0]?.propertyId || "");
+  const [buildingId, setBuildingId] = useState("");
+  const propertyOptions = [...new Map(locations.map((item) => [item.propertyId, { id: item.propertyId, name: item.propertyName }])).values()];
+  const buildingOptions = [...new Map(locations.filter((item) => item.propertyId === propertyId && item.buildingId).map((item) => [item.buildingId, { id: item.buildingId, name: item.buildingName }])).values()];
+  const floorOptions = [...new Map(locations.filter((item) => item.propertyId === propertyId && item.buildingId === buildingId && item.floorId).map((item) => [item.floorId, { id: item.floorId, name: item.floorName }])).values()];
+  async function submit(event) {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    await onSubmit({ title: form.get("title"), category: form.get("category"), priority: form.get("priority"),
+      propertyId, buildingId: buildingId || null, floorId: form.get("floorId") || null, description: form.get("description") });
+  }
+  return <div className="modalback show" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><form className="modal" onSubmit={submit}>
+    <div className="modalhead"><h2>Create ticket</h2><button type="button" className="x" onClick={onClose}>✕</button></div>
+    <p className="muted">Describe the issue and where it occurred. The helpdesk team will assign it.</p>
+    {optionsError && <div className="autherr">Could not load available locations: {optionsError}</div>}
+    {locations.length === 0 && !optionsError && <div className="autherr">No properties are available for your account. Contact your administrator.</div>}
+    <div className="formgrid">
+      <label><span className="formlabel">Issue title *</span><input name="title" required maxLength={220} placeholder="Briefly describe the issue" /></label>
+      <label><span className="formlabel">Category *</span><select name="category" required defaultValue="HVAC">{["HVAC", "Electrical", "Plumbing", "Civil", "Housekeeping", "Other"].map((item) => <option key={item}>{item}</option>)}</select></label>
+      <label><span className="formlabel">Priority *</span><select name="priority" required defaultValue="Medium">{["Low", "Medium", "High", "Critical"].map((item) => <option key={item}>{item}</option>)}</select></label>
+      <label><span className="formlabel">Property *</span><select required value={propertyId} onChange={(event) => { setPropertyId(event.target.value); setBuildingId(""); }}><option value="">Select property</option>{propertyOptions.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
+      <label><span className="formlabel">Tower / building</span><select value={buildingId} onChange={(event) => setBuildingId(event.target.value)}><option value="">Select tower (optional)</option>{buildingOptions.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
+      <label><span className="formlabel">Floor</span><select name="floorId" disabled={!buildingId}><option value="">Select floor (optional)</option>{floorOptions.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
+      <label className="wide"><span className="formlabel">Description *</span><textarea name="description" required rows="4" placeholder="Add details that will help resolve the issue" /></label>
+    </div>
+    <div className="modalfoot"><button type="button" className="secondary" onClick={onClose}>Cancel</button><button type="submit" disabled={!propertyId || locations.length === 0}>Create ticket</button></div>
+  </form></div>;
+}
+
+function ClientTicketDetails({ ticket, onClose }) {
+  return <div className="modalback show" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><div className="modal">
+    <div className="modalhead"><h2>{formatTicketId(ticket.id)} · Ticket details</h2><button className="x" onClick={onClose}>✕</button></div>
+    <h3>{ticket.title}</h3><div className="ticket-detail-grid"><span>Requester</span><b>{ticket.requester || "You"}</b><span>Location</span><b>{ticket.location || "—"}</b><span>Category</span><b>{ticket.category}</b><span>Priority</span><b>{ticket.priority}</b><span>Status</span><b><StatusPill status={ticket.status} /></b><span>Assigned to</span><b>{ticket.assignee || "Not assigned yet"}</b></div>
+    <p className="ticket-description">{ticket.description || "No description provided."}</p>
+    <div className="modalfoot"><button onClick={onClose}>Close</button></div>
+  </div></div>;
+}
+
+function formatTicketId(id) { return `T-${String(id || "").replaceAll("-", "").slice(0, 8).toUpperCase()}`; }
 
 function SettingsPage({ user, onPassword }) {
   return <><PageHeading title="Settings" description="Account, workspace and data controls." />

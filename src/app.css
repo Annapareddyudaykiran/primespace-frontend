@@ -22,8 +22,40 @@
 .auth-modes button{padding:9px 12px;border:0;border-radius:8px;background:transparent;color:#5b6c85;font-weight:700}
 .auth-modes button.active{background:#fff;color:#0b3fb8;box-shadow:0 1px 5px #0a1f441c}
 .signup-note{margin:8px 0!important;font-size:12px;line-height:1.5}
+.signup-notice{margin:8px 0;padding:12px;border-radius:8px;background:#edf7ff;color:#164a73;font-size:13px;line-height:1.5}
 .auth-form .autherr{min-height:0;padding:9px 11px;background:#fff1f2;border-radius:8px}
 .auth-right{overflow-y:auto}
+.role-tabs{display:flex;gap:8px;margin:0 0 18px;border-bottom:1px solid var(--line)}
+.role-tabs button{padding:10px 14px;border:0;border-bottom:2px solid transparent;border-radius:0;background:transparent;color:var(--muted);font-weight:700}
+.role-tabs button.active{color:#0b3fb8;border-bottom-color:#1f68e9}
+.user-table{min-width:1000px}
+.client-ticket-table{min-width:1050px}
+.formgrid .wide{grid-column:1/-1}
+.ticket-detail-grid{display:grid;grid-template-columns:140px 1fr;gap:10px 14px;margin:16px 0}
+.ticket-detail-grid>span{color:var(--muted);font-size:13px}
+.ticket-description{white-space:pre-wrap;padding:14px;border-radius:9px;background:#f5f8fc;color:#243b59}
+.role-pill{display:inline-flex;align-items:center;border-radius:999px;padding:4px 10px;background:#eaf1ff;color:#214c99;font-weight:700;white-space:nowrap}
+.notification-wrap{position:relative}
+.notification-bell{position:relative;display:grid;place-items:center;width:40px;height:40px;padding:0;border:1px solid var(--line);border-radius:50%;background:#fff;color:#18324f;font-size:18px}
+.notification-count{position:absolute;top:-5px;right:-5px;display:grid;place-items:center;min-width:19px;height:19px;padding:0 4px;border-radius:999px;background:#d6384b;color:#fff;font-size:11px;font-weight:800}
+.notification-popover{position:absolute;right:0;top:48px;z-index:20;width:min(390px,calc(100vw - 30px));max-height:70vh;overflow:auto;padding:14px;border:1px solid var(--line);border-radius:12px;background:#fff;box-shadow:0 12px 34px #152c4a26}
+.notification-heading{display:flex;justify-content:space-between;align-items:center;padding-bottom:10px;border-bottom:1px solid var(--line)}
+.notification-heading span,.notification-item>span{font-size:12px;color:var(--muted)}
+.notification-list{display:grid;gap:9px;padding-top:10px}
+.notification-item{display:grid;gap:5px;padding:10px;border:1px solid var(--line);border-radius:9px}
+.notification-actions{display:flex;gap:7px;margin-top:3px}
+.notification-view{width:100%;margin-top:10px}
+.notification-empty{padding:12px 2px;margin:0;color:var(--muted);font-size:13px}
+.error-text{color:#a52a36}
+.user-actions{display:flex;flex-wrap:wrap;gap:6px;min-width:290px}
+.user-actions .small{white-space:nowrap}
+.role-matrix-wrap{border-radius:12px}
+.role-matrix{min-width:820px}
+.role-matrix th:first-child{width:150px}
+.role-matrix th:nth-child(2){width:220px}
+.role-matrix td{line-height:1.55;vertical-align:middle}
+.role-matrix td:last-child{color:#29466c}
+@media(max-width:600px){.role-tabs{overflow-x:auto}.role-tabs button{white-space:nowrap}}
 .modalback>.modal p{line-height:1.6}
 @media(max-width:760px){.sidebar{position:static;width:100%;height:auto}.app{display:block}.nav{display:flex;flex:none;overflow-x:auto}.nav button{width:auto;white-space:nowrap}.sidebar-bottom{display:block}.chip{display:none}.topbar{padding:0 16px}.content{padding:20px 14px}.kpis{grid-template-columns:repeat(2,minmax(0,1fr))}.topright .user-label{display:none}}
 @media(max-width:480px){.kpis{grid-template-columns:1fr}.date-label{display:none}.toolbar input,.toolbar select{max-width:none;width:100%}.heading h1{font-size:21px}}
